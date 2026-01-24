@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -7,212 +6,75 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import scipy.optimize
 from datetime import datetime
+import json
 
 # ============================================================
-# 🔐 Firebase 設定 - 從 Streamlit Secrets 讀取（安全方式）
+# 📊 Google Sheets 使用者記錄功能
 # ============================================================
-def get_firebase_config():
-    """從 Streamlit Secrets 讀取 Firebase 設定"""
+def record_user_login():
+    """記錄使用者登入到 Google Sheets"""
     try:
-        # 嘗試從 Streamlit Secrets 讀取（部署環境）
-        return {
-            "apiKey": st.secrets["firebase"]["apiKey"],
-            "authDomain": st.secrets["firebase"]["authDomain"],
-            "projectId": st.secrets["firebase"]["projectId"],
-            "storageBucket": st.secrets["firebase"]["storageBucket"],
-            "messagingSenderId": st.secrets["firebase"]["messagingSenderId"],
-            "appId": st.secrets["firebase"]["appId"]
-        }
-    except Exception:
-        # 本地開發時顯示錯誤提示
-        st.error("⚠️ 找不到 Firebase 設定！請設定 Streamlit Secrets。")
-        st.info("""
-        **本地開發時**，請在專案目錄建立 `.streamlit/secrets.toml` 檔案：
-        ```toml
-        [firebase]
-        apiKey = "your-api-key"
-        authDomain = "your-project.firebaseapp.com"
-        projectId = "your-project-id"
-        storageBucket = "your-project.appspot.com"
-        messagingSenderId = "123456789"
-        appId = "1:xxx:web:xxx"
-        ```
+        import gspread
+        from google.oauth2.service_account import Credentials
         
-        **部署到 Streamlit Cloud 時**，請在 App Settings → Secrets 中設定。
-        """)
-        st.stop()
-
-# ============================================================
-# 🔐 認證相關函數
-# ============================================================
-def get_login_html(config):
-    """產生 Firebase 登入頁面 HTML"""
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <style>
-            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-            body {{
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                display: flex; justify-content: center; align-items: center;
-                min-height: 500px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            }}
-            .login-container {{
-                background: rgba(255,255,255,0.95);
-                padding: 40px 50px; border-radius: 20px;
-                box-shadow: 0 25px 50px rgba(0,0,0,0.25);
-                text-align: center; max-width: 400px; width: 90%;
-            }}
-            .logo {{ font-size: 64px; margin-bottom: 10px; }}
-            h1 {{ color: #333; margin-bottom: 10px; font-size: 28px; }}
-            .subtitle {{ color: #666; margin-bottom: 30px; font-size: 14px; }}
-            .google-btn {{
-                display: inline-flex; align-items: center; justify-content: center; gap: 12px;
-                background: #fff; border: 2px solid #ddd; padding: 14px 28px;
-                border-radius: 50px; cursor: pointer; font-size: 16px; font-weight: 500;
-                color: #333; transition: all 0.3s ease; width: 100%;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }}
-            .google-btn:hover {{
-                background: #f8f9fa; border-color: #4285f4;
-                box-shadow: 0 5px 20px rgba(66,133,244,0.3); transform: translateY(-2px);
-            }}
-            .google-btn img {{ width: 24px; height: 24px; }}
-            .loading {{ display: none; color: #666; margin-top: 20px; }}
-            .loading.active {{ display: block; }}
-            .spinner {{
-                border: 3px solid #f3f3f3; border-top: 3px solid #4285f4;
-                border-radius: 50%; width: 24px; height: 24px;
-                animation: spin 1s linear infinite; margin: 10px auto;
-            }}
-            @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
-            .error {{ color: #e74c3c; margin-top: 15px; font-size: 14px; display: none; }}
-            .footer {{ margin-top: 30px; color: #999; font-size: 12px; }}
-        </style>
-    </head>
-    <body>
-        <div class="login-container">
-            <div class="logo">🐔</div>
-            <h1>金雞計算機</h1>
-            <p class="subtitle">Galculator+ 投資回測工具</p>
-            <button class="google-btn" onclick="signInWithGoogle()">
-                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google">
-                使用 Google 帳號登入
-            </button>
-            <div class="loading" id="loading"><div class="spinner"></div><p>正在登入中...</p></div>
-            <p class="error" id="error"></p>
-            <p class="footer">登入即表示您同意使用條款</p>
-        </div>
-        <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-        <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
-        <script>
-            const firebaseConfig = {{
-                apiKey: "{config['apiKey']}",
-                authDomain: "{config['authDomain']}",
-                projectId: "{config['projectId']}",
-                storageBucket: "{config['storageBucket']}",
-                messagingSenderId: "{config['messagingSenderId']}",
-                appId: "{config['appId']}"
-            }};
-            firebase.initializeApp(firebaseConfig);
-            const auth = firebase.auth();
-            const provider = new firebase.auth.GoogleAuthProvider();
-            
-            async function signInWithGoogle() {{
-                const btn = document.querySelector('.google-btn');
-                const loading = document.getElementById('loading');
-                const error = document.getElementById('error');
-                btn.style.display = 'none';
-                loading.classList.add('active');
-                error.style.display = 'none';
-                try {{
-                    const result = await auth.signInWithPopup(provider);
-                    const user = result.user;
-                    sendUserData(user);
-                }} catch (err) {{
-                    console.error('登入錯誤:', err);
-                    btn.style.display = 'inline-flex';
-                    loading.classList.remove('active');
-                    error.textContent = '登入失敗: ' + err.message;
-                    error.style.display = 'block';
-                }}
-            }}
-            
-            async function sendUserData(user) {{
-                const token = await user.getIdToken();
-                const userData = JSON.stringify({{
-                    uid: user.uid, email: user.email,
-                    displayName: user.displayName, photoURL: user.photoURL, token: token
-                }});
-                // 使用 URL hash 傳遞資料
-                window.parent.location.hash = 'auth=' + btoa(unescape(encodeURIComponent(userData)));
-                window.parent.location.reload();
-            }}
-            
-            // 檢查是否已登入
-            auth.onAuthStateChanged((user) => {{
-                if (user) {{ sendUserData(user); }}
-            }});
-        </script>
-    </body>
-    </html>
-    """
-
-def parse_auth_from_url():
-    """從 URL hash 解析認證資訊"""
-    import urllib.parse
-    import base64
-    import json
-    try:
-        # Streamlit 的 query params
-        query_params = st.query_params
-        if 'auth' in query_params:
-            encoded = query_params['auth']
-            decoded = base64.b64decode(encoded).decode('utf-8')
-            return json.loads(decoded)
-    except:
+        # 檢查是否已記錄過（避免每次 rerun 都記錄）
+        if st.session_state.get('user_recorded', False):
+            return
+        
+        # 從 secrets 讀取 Google Sheets 設定
+        if 'gsheets' not in st.secrets:
+            return  # 如果沒有設定 Google Sheets，靜默跳過
+        
+        # 設定憑證
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        
+        # 從 secrets 取得服務帳戶憑證
+        credentials_dict = {
+            "type": st.secrets["gsheets"]["type"],
+            "project_id": st.secrets["gsheets"]["project_id"],
+            "private_key_id": st.secrets["gsheets"]["private_key_id"],
+            "private_key": st.secrets["gsheets"]["private_key"],
+            "client_email": st.secrets["gsheets"]["client_email"],
+            "client_id": st.secrets["gsheets"]["client_id"],
+            "auth_uri": st.secrets["gsheets"]["auth_uri"],
+            "token_uri": st.secrets["gsheets"]["token_uri"],
+            "auth_provider_x509_cert_url": st.secrets["gsheets"]["auth_provider_x509_cert_url"],
+            "client_x509_cert_url": st.secrets["gsheets"]["client_x509_cert_url"]
+        }
+        
+        credentials = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
+        client = gspread.authorize(credentials)
+        
+        # 開啟試算表
+        spreadsheet_id = st.secrets["gsheets"]["spreadsheet_id"]
+        sheet = client.open_by_key(spreadsheet_id).sheet1
+        
+        # 取得使用者資訊
+        user_email = getattr(st.user, 'email', 'unknown')
+        user_name = getattr(st.user, 'name', '') or user_email
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 檢查使用者是否已存在
+        try:
+            cell = sheet.find(user_email, in_column=1)
+            # 使用者存在，更新最後登入時間和登入次數
+            row = cell.row
+            current_count = int(sheet.cell(row, 5).value or 0)
+            sheet.update_cell(row, 4, now)  # 更新最後登入時間
+            sheet.update_cell(row, 5, current_count + 1)  # 更新登入次數
+        except gspread.exceptions.CellNotFound:
+            # 新使用者，新增一列
+            sheet.append_row([user_email, user_name, now, now, 1])
+        
+        # 標記已記錄
+        st.session_state.user_recorded = True
+        
+    except Exception as e:
+        # 靜默失敗，不影響主程式運作
         pass
-    return None
-
-def show_user_sidebar():
-    """在側邊欄顯示使用者資訊"""
-    user = st.session_state.get('user')
-    if user:
-        with st.sidebar:
-            st.markdown("---")
-            col1, col2 = st.columns([1, 3])
-            with col1:
-                if user.get('photoURL'):
-                    st.image(user['photoURL'], width=40)
-                else:
-                    st.markdown("👤")
-            with col2:
-                st.markdown(f"**{user.get('displayName', '使用者')}**")
-                st.caption(user.get('email', ''))
-            if st.button("🚪 登出", use_container_width=True, key="logout_btn"):
-                st.session_state.authenticated = False
-                st.session_state.user = None
-                st.query_params.clear()
-                st.rerun()
-
-def check_authentication():
-    """檢查並處理認證狀態"""
-    # 初始化 session state
-    if 'authenticated' not in st.session_state:
-        st.session_state.authenticated = False
-    if 'user' not in st.session_state:
-        st.session_state.user = None
-    
-    # 嘗試從 URL 解析認證資訊
-    user_data = parse_auth_from_url()
-    if user_data:
-        st.session_state.authenticated = True
-        st.session_state.user = user_data
-    
-    return st.session_state.authenticated
 
 
 def xirr(cash_flows):
@@ -238,20 +100,65 @@ def xirr(cash_flows):
 # ============================================================
 st.set_page_config(page_title="金雞計算機Galculator+", page_icon="🐔", layout="wide", initial_sidebar_state="expanded")
 
-# 檢查登入狀態
-is_authenticated = check_authentication()
-
-if not is_authenticated:
+# ============================================================
+# 🔐 使用 Streamlit 原生 OIDC 認證 (Google OAuth)
+# ============================================================
+# 檢查是否已登入
+if not st.user.is_logged_in:
     # 顯示登入頁面
-    st.title("🐔 金雞計算機Galculator+")
-    st.markdown("**作者：[豬力安](https://richedu168.blogspot.com/)**")
-    st.markdown("---")
-    st.info("👋 歡迎使用金雞計算機！請先登入以繼續使用。")
+    st.markdown("""
+    <style>
+    .login-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 60px 20px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 20px;
+        margin: 40px auto;
+        max-width: 500px;
+        box-shadow: 0 25px 50px rgba(0,0,0,0.25);
+    }
+    .login-logo { font-size: 80px; margin-bottom: 20px; }
+    .login-title { color: white; font-size: 36px; font-weight: bold; margin-bottom: 10px; }
+    .login-subtitle { color: rgba(255,255,255,0.8); font-size: 16px; margin-bottom: 30px; }
+    </style>
+    <div class="login-container">
+        <div class="login-logo">🐔</div>
+        <div class="login-title">金雞計算機</div>
+        <div class="login-subtitle">Galculator+ 投資回測工具</div>
+    </div>
+    """, unsafe_allow_html=True)
     
-    # 取得 Firebase 設定並嵌入登入頁面
-    firebase_config = get_firebase_config()
-    components.html(get_login_html(firebase_config), height=550, scrolling=False)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.button("🔐 使用 Google 帳號登入", on_click=st.login, use_container_width=True, type="primary")
+        st.caption("登入即表示您同意我們收集基本資料以改善服務")
     st.stop()
+
+# ============================================================
+# ✅ 已登入 - 記錄使用者並顯示資訊
+# ============================================================
+# 記錄使用者到 Google Sheets
+record_user_login()
+
+def show_user_sidebar():
+    """在側邊欄顯示使用者資訊"""
+    with st.sidebar:
+        st.markdown("---")
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if hasattr(st.user, 'picture') and st.user.picture:
+                st.image(st.user.picture, width=40)
+            else:
+                st.markdown("👤")
+        with col2:
+            name = getattr(st.user, 'name', None) or getattr(st.user, 'email', '使用者')
+            st.markdown(f"**{name}**")
+            if hasattr(st.user, 'email'):
+                st.caption(st.user.email)
+        st.button("🚪 登出", on_click=st.logout, use_container_width=True)
 
 # ============================================================
 # ✅ 已登入 - 顯示主應用程式
