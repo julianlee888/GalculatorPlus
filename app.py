@@ -73,8 +73,8 @@ def record_user_login():
         st.session_state.user_recorded = True
         
     except Exception as e:
-        # 靜默失敗，不影響主程式運作
-        pass
+        # 輸出錯誤到 console（可在 Streamlit Cloud Logs 查看）
+        print(f"[Google Sheets 錯誤] {type(e).__name__}: {e}")
 
 
 def xirr(cash_flows):
