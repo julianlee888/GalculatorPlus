@@ -13,17 +13,22 @@ import json
 # ============================================================
 def record_user_login():
     """記錄使用者登入到 Google Sheets"""
+    print("[DEBUG] record_user_login() 開始執行")
     try:
         import gspread
         from google.oauth2.service_account import Credentials
         
         # 檢查是否已記錄過（避免每次 rerun 都記錄）
         if st.session_state.get('user_recorded', False):
+            print("[DEBUG] 已記錄過，跳過")
             return
         
         # 從 secrets 讀取 Google Sheets 設定
         if 'gsheets' not in st.secrets:
+            print("[DEBUG] secrets 中找不到 gsheets 區塊，跳過")
             return  # 如果沒有設定 Google Sheets，靜默跳過
+        
+        print("[DEBUG] 找到 gsheets 設定，開始連接...")
         
         # 設定憑證
         scopes = [
