@@ -11,26 +11,30 @@ import json
 # ============================================================
 # 📊 Google Sheets 使用者記錄功能
 # ============================================================
-def record_user_login():
-    """記錄使用者登入到 Google Sheets"""
-    print("[GSheets] 開始執行 record_user_login()")
+def record_user_login(debug=True):
+    """記錄使用者登入到 Google Sheets
     
+    Args:
+        debug: 如果為 True，會在側邊欄顯示除錯訊息
+    """
     try:
         import gspread
         from google.oauth2.service_account import Credentials
         
         # 檢查是否已記錄過（避免每次 rerun 都記錄）
         if st.session_state.get('user_recorded', False):
-            print("[GSheets] 已記錄過，跳過")
+            if debug:
+                st.sidebar.success("✅ 使用者已記錄過")
             return
         
         # 從 secrets 讀取 Google Sheets 設定
         if 'gsheets' not in st.secrets:
-            print("[GSheets] 錯誤：secrets 中沒有 [gsheets] 區塊！")
-            print(f"[GSheets] 可用的 secrets keys: {list(st.secrets.keys())}")
+            if debug:
+                st.sidebar.warning("⚠️ 未設定 [gsheets]，跳過記錄")
             return
         
-        print("[GSheets] 找到 gsheets 設定，開始連線...")
+        if debug:
+            st.sidebar.info("🔄 正在連接 Google Sheets...")
         
         # 設定憑證
         scopes = [
@@ -52,26 +56,23 @@ def record_user_login():
             "client_x509_cert_url": st.secrets["gsheets"]["client_x509_cert_url"]
         }
         
-        print(f"[GSheets] 服務帳戶: {credentials_dict['client_email']}")
-        
         credentials = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
         client = gspread.authorize(credentials)
         
-        print("[GSheets] 憑證驗證成功，開啟試算表...")
+        if debug:
+            st.sidebar.info("🔄 正在開啟試算表...")
         
         # 開啟試算表
         spreadsheet_id = st.secrets["gsheets"]["spreadsheet_id"]
-        print(f"[GSheets] 試算表 ID: {spreadsheet_id}")
         sheet = client.open_by_key(spreadsheet_id).sheet1
-        
-        print("[GSheets] 試算表開啟成功！")
         
         # 取得使用者資訊
         user_email = getattr(st.user, 'email', 'unknown')
         user_name = getattr(st.user, 'name', '') or user_email
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        print(f"[GSheets] 使用者: {user_email}")
+        if debug:
+            st.sidebar.info(f"🔄 使用者: {user_email}")
         
         # 檢查使用者是否已存在
         try:
@@ -81,19 +82,21 @@ def record_user_login():
             current_count = int(sheet.cell(row, 5).value or 0)
             sheet.update_cell(row, 4, now)  # 更新最後登入時間
             sheet.update_cell(row, 5, current_count + 1)  # 更新登入次數
-            print(f"[GSheets] 更新現有使用者，row={row}, count={current_count + 1}")
+            if debug:
+                st.sidebar.success(f"✅ 已更新使用者記錄（第 {row} 列）")
         except gspread.exceptions.CellNotFound:
             # 新使用者，新增一列
             sheet.append_row([user_email, user_name, now, now, 1])
-            print(f"[GSheets] 新增使用者: {user_email}")
+            if debug:
+                st.sidebar.success("✅ 已新增使用者記錄")
         
         # 標記已記錄
         st.session_state.user_recorded = True
-        print("[GSheets] ✅ 記錄完成！")
         
     except Exception as e:
-        # 輸出錯誤到 console（可在 Streamlit Cloud Logs 查看）
-        print(f"[GSheets] ❌ 錯誤: {type(e).__name__}: {e}")
+        # 顯示錯誤訊息以便除錯
+        if debug:
+            st.sidebar.error(f"❌ Google Sheets 錯誤: {str(e)}")
 
 
 def xirr(cash_flows):
