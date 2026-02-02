@@ -74,9 +74,9 @@ def record_user_login(debug=True):
         if debug:
             st.sidebar.info(f"🔄 使用者: {user_email}")
         
-        # 檢查使用者是否已存在
-        try:
-            cell = sheet.find(user_email, in_column=1)
+        # 檢查使用者是否已存在（新版 gspread 的 find 返回 None 而非拋出例外）
+        cell = sheet.find(user_email, in_column=1)
+        if cell:
             # 使用者存在，更新最後登入時間和登入次數
             row = cell.row
             current_count = int(sheet.cell(row, 5).value or 0)
@@ -84,7 +84,7 @@ def record_user_login(debug=True):
             sheet.update_cell(row, 5, current_count + 1)  # 更新登入次數
             if debug:
                 st.sidebar.success(f"✅ 已更新使用者記錄（第 {row} 列）")
-        except gspread.exceptions.CellNotFound:
+        else:
             # 新使用者，新增一列
             sheet.append_row([user_email, user_name, now, now, 1])
             if debug:
