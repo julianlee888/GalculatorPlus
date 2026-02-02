@@ -11,7 +11,7 @@ import json
 # ============================================================
 # 📊 Google Sheets 使用者記錄功能
 # ============================================================
-def record_user_login(debug=True):
+def record_user_login(debug=False):
     """記錄使用者登入到 Google Sheets
     
     Args:
@@ -156,7 +156,31 @@ if not st.user.is_logged_in:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.button("🔐 使用 Google 帳號登入", on_click=st.login, use_container_width=True, type="primary")
-        st.caption("登入即表示您同意我們收集基本資料以改善服務")
+        
+        # 隱私權說明
+        st.caption("🔒 登入即表示您同意我們的隱私權政策")
+        
+        with st.expander("📋 隱私權說明", expanded=False):
+            st.markdown("""
+            **我們收集的資料：**
+            - 您的 Google 帳號 Email
+            - 您的 Google 帳號顯示名稱
+            - 登入時間記錄
+            
+            **資料用途：**
+            - 提供個人化服務體驗
+            - 寄送產品更新、活動資訊或相關內容
+            - 服務改善與統計分析
+            
+            **資料保護：**
+            - 我們不會將您的資料出售給第三方
+            - 資料安全儲存於 Google 服務
+            
+            **您的權利：**
+            - 您可隨時要求查看、更正或刪除您的個人資料
+            - 如需退訂行銷郵件，請點擊郵件中的取消訂閱連結
+            - 如有疑問，請聯繫：https://lin.ee/hTsvz68
+            """)
     st.stop()
 
 # ============================================================
