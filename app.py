@@ -126,7 +126,7 @@ st.set_page_config(page_title="金雞計算機Galculator+", page_icon="🐔", la
 # 🔐 使用 Streamlit 原生 OIDC 認證 (Google OAuth)
 # ============================================================
 # 檢查是否已登入
-if not st.user.is_logged_in:
+if "email" not in st.user:
     # 顯示登入頁面
     st.markdown("""
     <style>
@@ -720,3 +720,4 @@ if st.session_state.get('results'):
         
         sel = st.selectbox("選擇投資組合", opts, index=idx, key='view_portfolio_selector')
         if sel: st.dataframe(res['monthly_data'][sel].style.format("{:,.0f}"))
+
