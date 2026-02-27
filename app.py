@@ -169,7 +169,7 @@ if "email" not in st.user:
             
             **資料用途：**
             - 提供個人化服務體驗
-            - 寄送產品更新、活動資訊或相關內容
+            - 寄送產品更新、活動資訊或投資相關內容
             - 服務改善與統計分析
             
             **資料保護：**
@@ -179,7 +179,7 @@ if "email" not in st.user:
             **您的權利：**
             - 您可隨時要求查看、更正或刪除您的個人資料
             - 如需退訂行銷郵件，請點擊郵件中的取消訂閱連結
-            - 如有疑問，請聯繫：https://lin.ee/hTsvz68
+            - 如有疑問，請聯繫：[您的聯絡方式]
             """)
     st.stop()
 
@@ -225,8 +225,8 @@ with st.sidebar:
     with st.expander("📅 回測時間", expanded=True):
         default_start = datetime(1990, 1, 1)
         default_end = datetime.now()
-        start_date = st.date_input("開始日期", default_start, min_value=datetime(1900, 1, 1))
-        end_date = st.date_input("結束日期", default_end)
+        start_date = st.date_input("開始日期", default_start, min_value=datetime(1900, 1, 1), max_value=datetime.now())
+        end_date = st.date_input("結束日期", default_end, min_value=datetime(1900, 1, 1), max_value=datetime.now())
         # Optimization #5: Date validation
         if start_date >= end_date:
             st.error("⚠️ 開始日期必須早於結束日期")
@@ -720,4 +720,3 @@ if st.session_state.get('results'):
         
         sel = st.selectbox("選擇投資組合", opts, index=idx, key='view_portfolio_selector')
         if sel: st.dataframe(res['monthly_data'][sel].style.format("{:,.0f}"))
-
