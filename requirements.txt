@@ -1,4 +1,4 @@
-streamlit>=1.32.0
+streamlit[auth]>=1.32.0
 yfinance
 pandas
 numpy
@@ -6,4 +6,4 @@ plotly
 scipy
 gspread
 google-auth
-Authlib==1.6.5
+
