@@ -1,4 +1,5 @@
 streamlit[auth]>=1.32.0
+httpx
 yfinance
 pandas
 numpy
