@@ -122,6 +122,20 @@ def xirr(cash_flows):
 # ============================================================
 st.set_page_config(page_title="金雞計算機Galculator+", page_icon="🐔", layout="wide", initial_sidebar_state="expanded")
 
+def get_login_provider():
+    """Return a named OIDC provider when secrets use [auth.google]."""
+    auth_config = st.secrets.get("auth", {})
+    if hasattr(auth_config, "get") and auth_config.get("google"):
+        return "google"
+    return None
+
+def login_with_google():
+    provider = get_login_provider()
+    if provider:
+        st.login(provider)
+    else:
+        st.login()
+
 # ============================================================
 # 🔐 使用 Streamlit 原生 OIDC 認證 (Google OAuth)
 # ============================================================
@@ -155,10 +169,10 @@ if not st.user.is_logged_in:
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.button("🔐 使用 Google 帳號登入", on_click=st.login, use_container_width=True, type="primary")
+        st.button("🔐 使用 Google 帳號登入", on_click=login_with_google, use_container_width=True, type="primary")
         auth_debug_enabled = st.secrets.get("debug_auth", False) or st.secrets.get("auth", {}).get("debug_auth", False)
         if auth_debug_enabled:
-            st.caption(f"Auth debug: is_logged_in={st.user.is_logged_in}, user_keys={list(st.user.to_dict().keys())}")
+            st.caption(f"Auth debug: is_logged_in={st.user.is_logged_in}, provider={get_login_provider() or 'default'}, user_keys={list(st.user.to_dict().keys())}")
         
         # 隱私權說明
         st.caption("🔒 登入即表示您同意我們的隱私權政策")
