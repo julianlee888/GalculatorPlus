@@ -126,7 +126,7 @@ st.set_page_config(page_title="金雞計算機Galculator+", page_icon="🐔", la
 # 🔐 使用 Streamlit 原生 OIDC 認證 (Google OAuth)
 # ============================================================
 # 檢查是否已登入
-if "email" not in st.user:
+if not st.user.is_logged_in:
     # 顯示登入頁面
     st.markdown("""
     <style>
