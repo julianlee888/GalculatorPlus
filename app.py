@@ -373,7 +373,7 @@ if not st.user.is_logged_in:
             **您的權利：**
             - 您可隨時要求查看、更正或刪除您的個人資料
             - 如需退訂行銷郵件，請點擊郵件中的取消訂閱連結
-            - 如有疑問或希望查看、更正、刪除資料，請聯繫：[ju888.lee@gmail.com](mailto:ju888.lee@gmail.com)
+            - 如有疑問或希望查看、更正、刪除資料，請聯繫：[官方 LINE](https://lin.ee/hTsvz68)
             """)
     st.stop()
 
@@ -643,7 +643,7 @@ if run_backtest:
                     st.error(
                         "偵測到疑似漏算分割、反分割或錯價，為避免產生誤導結果，已停止計算：\n\n- "
                         + "\n- ".join(quality_issues[:5])
-                        + "\n\n請縮短回測期間，或將商品代碼與日期寄到 ju888.lee@gmail.com 協助確認。"
+                        + "\n\n請縮短回測期間，或透過官方 LINE（https://lin.ee/hTsvz68）提供商品代碼與日期，協助確認。"
                     )
                     st.session_state.results = None
                     st.stop()
@@ -1018,4 +1018,4 @@ if st.session_state.get('results'):
             st.dataframe(detail_df.style.format("{:,.0f}"), use_container_width=True)
 
 st.markdown("---")
-st.caption("作者：[豬力安](https://richedu168.blogspot.com/)｜聯絡信箱：ju888.lee@gmail.com")
+st.caption("作者：[豬力安](https://richedu168.blogspot.com/)｜管理員聯絡方式：[官方 LINE](https://lin.ee/hTsvz68)")
