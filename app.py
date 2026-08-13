@@ -5,8 +5,89 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import scipy.optimize
-from datetime import datetime
-import json
+from datetime import datetime, timedelta
+import re
+
+
+TICKER_PATTERN = re.compile(r"^[A-Z0-9.^=-]{1,20}$")
+TAIWAN_CODE_PATTERN = re.compile(r"^\d{4,6}[A-Z]?$")
+KNOWN_MINIMUM_SAFE_DATES = {
+    "00631L.TW": pd.Timestamp("2015-08-24"),
+}
+
+
+def normalize_ticker(value):
+    """Normalize a user-entered symbol and auto-add Taiwan's listed suffix."""
+    ticker = str(value or '').strip().upper()
+    if ticker != 'CASH0' and TAIWAN_CODE_PATTERN.fullmatch(ticker):
+        return f"{ticker}.TW", True
+    return ticker, False
+
+
+def apply_known_yahoo_repairs(data, tickers):
+    """Repair confirmed Yahoo split discontinuities without guessing unknown ones."""
+    if data is None or data.empty or "0050.TW" not in tickers:
+        return data, []
+
+    repaired = data.copy()
+    cutoff = pd.Timestamp("2014-01-02")
+    before_cutoff = repaired.index < cutoff
+    if not before_cutoff.any():
+        return repaired, []
+
+    price_columns = ('Open', 'High', 'Low', 'Close', 'Adj Close')
+    if isinstance(repaired.columns, pd.MultiIndex):
+        for column_name in price_columns:
+            column = (column_name, "0050.TW")
+            if column in repaired.columns:
+                repaired.loc[before_cutoff, column] = repaired.loc[before_cutoff, column] / 4.0
+        volume_column = ('Volume', "0050.TW")
+        if volume_column in repaired.columns:
+            repaired.loc[before_cutoff, volume_column] = repaired.loc[before_cutoff, volume_column] * 4.0
+    elif len(tickers) == 1:
+        for column_name in price_columns:
+            if column_name in repaired.columns:
+                repaired.loc[before_cutoff, column_name] = repaired.loc[before_cutoff, column_name] / 4.0
+        if 'Volume' in repaired.columns:
+            repaired.loc[before_cutoff, 'Volume'] = repaired.loc[before_cutoff, 'Volume'] * 4.0
+
+    return repaired, ["0050.TW：已修正 Yahoo 在 2014-01-02 前漏套用的 4:1 分割還原。"]
+
+
+def find_suspicious_price_jumps(data, tickers):
+    """Find extreme adjusted-price jumps that likely indicate bad corporate-action data."""
+    issues = []
+    for ticker in tickers:
+        series = None
+        if isinstance(data.columns, pd.MultiIndex):
+            for column_name in ('Adj Close', 'Close'):
+                if (column_name, ticker) in data.columns:
+                    series = data[(column_name, ticker)]
+                    break
+        elif len(tickers) == 1:
+            for column_name in ('Adj Close', 'Close'):
+                if column_name in data.columns:
+                    series = data[column_name]
+                    break
+        if series is None:
+            continue
+
+        if ticker in KNOWN_MINIMUM_SAFE_DATES:
+            series = series[series.index >= KNOWN_MINIMUM_SAFE_DATES[ticker]]
+        threshold = 0.30 if ticker.endswith(('.TW', '.TWO')) else 0.50
+        jumps = series.dropna().pct_change(fill_method=None).abs()
+        suspicious = jumps[jumps > threshold]
+        for event_date, change in suspicious.items():
+            issues.append(f"{ticker} 在 {event_date:%Y-%m-%d} 出現 {change:.1%} 的異常跳價")
+    return issues
+
+
+def sheet_safe_text(value):
+    """Prevent spreadsheet formula execution for identity-provider text."""
+    text = str(value or '')
+    if text.startswith(('=', '+', '-', '@')):
+        return "'" + text
+    return text
 
 # ============================================================
 # 📊 Google Sheets 使用者記錄功能
@@ -38,8 +119,7 @@ def record_user_login(debug=False):
         
         # 設定憑證
         scopes = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive'
+            'https://www.googleapis.com/auth/spreadsheets'
         ]
         
         # 從 secrets 取得服務帳戶憑證
@@ -67,8 +147,8 @@ def record_user_login(debug=False):
         sheet = client.open_by_key(spreadsheet_id).sheet1
         
         # 取得使用者資訊
-        user_email = getattr(st.user, 'email', 'unknown')
-        user_name = getattr(st.user, 'name', '') or user_email
+        user_email = sheet_safe_text(getattr(st.user, 'email', 'unknown'))
+        user_name = sheet_safe_text(getattr(st.user, 'name', '') or user_email)
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
         if debug:
@@ -102,25 +182,121 @@ def record_user_login(debug=False):
 def xirr(cash_flows):
     try:
         dates, amounts = zip(*cash_flows)
-        if len(dates) < 2: return 0.0
+        if len(dates) < 2 or not any(amount < 0 for amount in amounts) or not any(amount > 0 for amount in amounts):
+            return None
         min_date = min(dates)
         days = [(d - min_date).days for d in dates]
         def npv(rate):
             if rate <= -1.0: return float('inf')
             return np.sum(np.array(amounts) / np.power(1 + rate, np.array(days) / 365.0))
         try:
+            cash_flow_scale = max(sum(abs(amount) for amount in amounts), 1.0)
+            if abs(npv(0.0)) <= cash_flow_scale * 1e-10:
+                return 0.0
             result = scipy.optimize.newton(npv, 0.1, maxiter=50)
-            # Optimization #2: Cap XIRR to reasonable range
-            return max(-1.0, min(10.0, result))  # -100% to +1000%
-        except:
-            return 0.0
-    except:
-        return 0.0
+            return float(result) if np.isfinite(result) and result > -1.0 else None
+        except (RuntimeError, OverflowError, ZeroDivisionError, ValueError, FloatingPointError):
+            return None
+    except (TypeError, ValueError):
+        return None
+
+
+def validate_portfolios(portfolios):
+    """Return user-facing validation errors for all portfolios."""
+    errors = []
+    names = []
+
+    for portfolio_index, portfolio in enumerate(portfolios, start=1):
+        name = str(portfolio.get('name', '')).strip()
+        display_name = name or f"組合 {portfolio_index}"
+        names.append(name.casefold())
+
+        if not name:
+            errors.append(f"{display_name}：請輸入組合名稱")
+
+        assets = portfolio.get('assets', [])
+        tickers = [str(asset.get('ticker', '')).strip().upper() for asset in assets]
+        if any(not ticker for ticker in tickers):
+            errors.append(f"{display_name}：資產代碼不可空白")
+
+        invalid_formats = sorted({ticker for ticker in tickers if ticker and not TICKER_PATTERN.fullmatch(ticker)})
+        if invalid_formats:
+            errors.append(f"{display_name}：資產代碼格式不正確（{', '.join(invalid_formats)}）")
+
+        duplicate_tickers = sorted({ticker for ticker in tickers if ticker and tickers.count(ticker) > 1})
+        if duplicate_tickers:
+            errors.append(f"{display_name}：資產代碼重複（{', '.join(duplicate_tickers)}）")
+
+        total_weight = sum(int(asset.get('weight', 0)) for asset in assets)
+        if total_weight != 100:
+            errors.append(f"{display_name}：權重合計為 {total_weight}%，必須等於 100%")
+
+    duplicate_names = sorted({name for name in names if name and names.count(name) > 1})
+    if duplicate_names:
+        errors.append("投資組合名稱不可重複")
+
+    return errors
+
+
+def first_valid_price_index(data, ticker):
+    """Find the first usable adjusted/close price for a downloaded ticker."""
+    if data is None or data.empty:
+        return None
+
+    if isinstance(data.columns, pd.MultiIndex):
+        for column_name in ('Adj Close', 'Close'):
+            if (column_name, ticker) in data.columns:
+                return data[(column_name, ticker)].first_valid_index()
+        return None
+
+    for column_name in ('Adj Close', 'Close'):
+        if column_name in data.columns:
+            return data[column_name].first_valid_index()
+    return None
+
+
+def update_unit_nav(previous_value, ending_value, net_external_flow, previous_nav):
+    """Calculate a cash-flow-neutral daily NAV using start-of-day flows."""
+    adjusted_start = previous_value + net_external_flow
+    if adjusted_start <= 0 or previous_nav <= 0:
+        return previous_nav
+    period_return = (ending_value - adjusted_start) / adjusted_start
+    return previous_nav * (1 + period_return)
 
 # ============================================================
 # 🚀 應用程式入口
 # ============================================================
-st.set_page_config(page_title="金雞計算機Galculator+", page_icon="🐔", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="金雞計算機Galculator+", page_icon="🐔", layout="wide", initial_sidebar_state="collapsed")
+
+st.markdown("""
+<style>
+:root { --gp-green: #175c45; --gp-gold: #c99720; --gp-ink: #17221e; }
+.stApp { color: var(--gp-ink); }
+.block-container { max-width: 1120px; padding-top: 1.5rem; padding-bottom: 3rem; }
+h1 { font-size: 2.15rem !important; line-height: 1.25 !important; }
+h2 { font-size: 1.55rem !important; line-height: 1.35 !important; }
+h3 { font-size: 1.25rem !important; }
+p, label, [data-testid="stCaptionContainer"] { line-height: 1.65 !important; }
+[data-testid="stWidgetLabel"] p { font-size: 1.05rem !important; font-weight: 650 !important; }
+.stButton > button, .stDownloadButton > button {
+    min-height: 48px; border-radius: 6px; font-size: 1.05rem; font-weight: 700;
+}
+.stTextInput input, .stNumberInput input, [data-baseweb="select"] > div {
+    min-height: 48px; font-size: 1.05rem !important;
+}
+[data-testid="stMetricValue"] { font-size: 1.85rem !important; }
+[data-testid="stMetricLabel"] { font-size: 1rem !important; }
+[data-testid="stRadio"] [role="radiogroup"] { flex-wrap: wrap; gap: .4rem 1rem; }
+[data-testid="stAlert"] { border-radius: 6px; }
+@media (max-width: 768px) {
+    .block-container { padding: .8rem .75rem 2rem; }
+    h1 { font-size: 1.7rem !important; }
+    h2 { font-size: 1.35rem !important; }
+    .stButton > button { width: 100%; }
+    [data-testid="stMetricValue"] { font-size: 1.55rem !important; }
+}
+</style>
+""", unsafe_allow_html=True)
 
 def get_login_provider():
     """Return a named OIDC provider when secrets use [auth.google]."""
@@ -149,12 +325,13 @@ if not st.user.is_logged_in:
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        padding: 60px 20px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 20px;
+        padding: 48px 20px;
+        background: #175c45;
+        border-top: 6px solid #c99720;
+        border-radius: 8px;
         margin: 40px auto;
         max-width: 500px;
-        box-shadow: 0 25px 50px rgba(0,0,0,0.25);
+        box-shadow: 0 12px 28px rgba(0,0,0,0.18);
     }
     .login-logo { font-size: 80px; margin-bottom: 20px; }
     .login-title { color: white; font-size: 36px; font-weight: bold; margin-bottom: 10px; }
@@ -196,7 +373,7 @@ if not st.user.is_logged_in:
             **您的權利：**
             - 您可隨時要求查看、更正或刪除您的個人資料
             - 如需退訂行銷郵件，請點擊郵件中的取消訂閱連結
-            - 如有疑問，請聯繫：[您的聯絡方式]
+            - 如有疑問或希望查看、更正、刪除資料，請聯繫：[ju888.lee@gmail.com](mailto:ju888.lee@gmail.com)
             """)
     st.stop()
 
@@ -227,112 +404,190 @@ def show_user_sidebar():
 # ✅ 已登入 - 顯示主應用程式
 # ============================================================
 st.title("🐔 金雞計算機Galculator+")
-st.markdown("**作者：[豬力安](https://richedu168.blogspot.com/)**")
-st.markdown("---")
+st.caption("用歷史資料比較投資方式。過去績效不代表未來表現。")
 show_user_sidebar()
 
-with st.sidebar:
-    st.header("⚙️ 參數設定")
-    currency_label = "元"
-    
-    with st.expander("💰 資金設定", expanded=True):
+st.header("開始設定")
+st.write("依照下面四個步驟設定，完成後按下「開始計算」。")
+currency_label = "元"
+
+setup_col1, setup_col2 = st.columns(2)
+with setup_col1:
+    with st.expander("步驟 1｜投入多少錢", expanded=True):
         initial_capital = st.number_input(f"初始投資金額 ({currency_label})", min_value=0, value=0, step=10000)
         monthly_investment = st.number_input(f"每月定期定額金額 ({currency_label})", min_value=0, value=2000, step=1000)
-        
-    with st.expander("📅 回測時間", expanded=True):
+
+with setup_col2:
+    with st.expander("步驟 2｜選擇回測期間", expanded=True):
         default_start = datetime(1990, 1, 1)
         default_end = datetime.now()
         start_date = st.date_input("開始日期", default_start, min_value=datetime(1900, 1, 1), max_value=datetime.now())
         end_date = st.date_input("結束日期", default_end, min_value=datetime(1900, 1, 1), max_value=datetime.now())
-        # Optimization #5: Date validation
         if start_date >= end_date:
             st.error("⚠️ 開始日期必須早於結束日期")
         date_ok = (start_date < end_date)
 
-    st.markdown("---")
-    st.subheader("📊 投資組合設定")
-    
-    if 'portfolios' not in st.session_state:
-        st.session_state.portfolios = [{"name": "預設組合", "assets": [{"ticker": "QQQ", "weight": 100}], "withdrawal_enabled": False}]
-    
-    for p in st.session_state.portfolios:
-        if 'withdrawal_enabled' not in p: p['withdrawal_enabled'] = False
-        if 'w_rate' not in p: p['w_rate'] = 4.0
-        if 'w_inflation' not in p: p['w_inflation'] = 2.0
-        if 'w_start_year' not in p: p['w_start_year'] = 1
+st.markdown("---")
+st.subheader("步驟 3｜設定投資組合")
 
-    selected_portfolio_idx = st.selectbox("選擇編輯的投資組合", range(len(st.session_state.portfolios)), format_func=lambda i: st.session_state.portfolios[i]['name'])
+if 'portfolios' not in st.session_state:
+    st.session_state.portfolios = [{"name": "預設組合", "assets": [{"ticker": "QQQ", "weight": 100}], "withdrawal_enabled": False}]
 
-    col_p1, col_p2, col_p3 = st.columns(3)
-    with col_p1:
-        if st.button("➕ 新增組合") and len(st.session_state.portfolios) < 10:
-            st.session_state.portfolios.append({"name": f"組合 {len(st.session_state.portfolios)+1}", "assets": [{"ticker": "QQQ", "weight": 100}], "withdrawal_enabled": False, "w_rate": 4.0, "w_inflation": 2.0, "w_start_year": 1})
-            st.rerun()
-    with col_p2:
-        if st.button("©️ 複製組合") and len(st.session_state.portfolios) < 10:
-            src = st.session_state.portfolios[selected_portfolio_idx]
-            st.session_state.portfolios.append({"name": src["name"] + " (副本)", "assets": [{"ticker": a["ticker"], "weight": a["weight"]} for a in src["assets"]], "withdrawal_enabled": src.get("withdrawal_enabled", False), "w_rate": src.get("w_rate", 4.0), "w_inflation": src.get("w_inflation", 2.0), "w_start_year": src.get("w_start_year", 1)})
-            st.rerun()
-    with col_p3:
-        if st.button("➖ 刪除組合") and len(st.session_state.portfolios) > 1:
-            st.session_state.portfolios.pop(selected_portfolio_idx)
-            st.rerun()
+for p in st.session_state.portfolios:
+    if 'withdrawal_enabled' not in p: p['withdrawal_enabled'] = False
+    if 'w_rate' not in p: p['w_rate'] = 4.0
+    if 'w_inflation' not in p: p['w_inflation'] = 2.0
+    if 'w_start_year' not in p: p['w_start_year'] = 1
 
-    if selected_portfolio_idx >= len(st.session_state.portfolios):
-        selected_portfolio_idx = len(st.session_state.portfolios) - 1
+selected_portfolio_idx = st.selectbox("目前編輯的投資組合", range(len(st.session_state.portfolios)), format_func=lambda i: st.session_state.portfolios[i]['name'])
 
-    curr_p = st.session_state.portfolios[selected_portfolio_idx]
-    curr_p['name'] = st.text_input("組合名稱", curr_p['name'])
+col_p1, col_p2, col_p3 = st.columns(3)
+with col_p1:
+    if st.button("➕ 新增組合", use_container_width=True) and len(st.session_state.portfolios) < 10:
+        st.session_state.portfolios.append({"name": f"組合 {len(st.session_state.portfolios)+1}", "assets": [{"ticker": "QQQ", "weight": 100}], "withdrawal_enabled": False, "w_rate": 4.0, "w_inflation": 2.0, "w_start_year": 1})
+        st.rerun()
+with col_p2:
+    if st.button("📋 複製組合", use_container_width=True) and len(st.session_state.portfolios) < 10:
+        src = st.session_state.portfolios[selected_portfolio_idx]
+        st.session_state.portfolios.append({"name": src["name"] + " (副本)", "assets": [{"ticker": a["ticker"], "weight": a["weight"]} for a in src["assets"]], "withdrawal_enabled": src.get("withdrawal_enabled", False), "w_rate": src.get("w_rate", 4.0), "w_inflation": src.get("w_inflation", 2.0), "w_start_year": src.get("w_start_year", 1)})
+        st.rerun()
+with col_p3:
+    if st.button("🗑️ 刪除組合", use_container_width=True, disabled=len(st.session_state.portfolios) <= 1):
+        st.session_state.portfolios.pop(selected_portfolio_idx)
+        for portfolio_index in range(10):
+            st.session_state.pop(f"name_{portfolio_index}", None)
+            st.session_state.pop(f"preset_{portfolio_index}", None)
+            for asset_index in range(10):
+                st.session_state.pop(f"t_{portfolio_index}_{asset_index}", None)
+                st.session_state.pop(f"w_{portfolio_index}_{asset_index}", None)
+        st.rerun()
+
+if selected_portfolio_idx >= len(st.session_state.portfolios):
+    selected_portfolio_idx = len(st.session_state.portfolios) - 1
+
+curr_p = st.session_state.portfolios[selected_portfolio_idx]
+curr_p['name'] = st.text_input("組合名稱", curr_p['name'], key=f"name_{selected_portfolio_idx}")
+
+preset_options = {
+    "自行設定": None,
+    "台灣大型股｜0050 100%": [{"ticker": "0050.TW", "weight": 100}],
+    "美國大型股｜SPY 100%": [{"ticker": "SPY", "weight": 100}],
+    "美國科技股｜QQQ 100%": [{"ticker": "QQQ", "weight": 100}],
+    "股債平衡｜SPY 60% + BND 40%": [{"ticker": "SPY", "weight": 60}, {"ticker": "BND", "weight": 40}],
+    "穩健配置｜SPY 40% + BND 40% + 現金 20%": [{"ticker": "SPY", "weight": 40}, {"ticker": "BND", "weight": 40}, {"ticker": "CASH0", "weight": 20}],
+}
+preset_col1, preset_col2 = st.columns([2, 1])
+with preset_col1:
+    selected_preset = st.selectbox("常用組合範例", list(preset_options), key=f"preset_{selected_portfolio_idx}")
+with preset_col2:
+    st.write("")
+    if st.button("套用這個範例", use_container_width=True, disabled=preset_options[selected_preset] is None):
+        curr_p['assets'] = [asset.copy() for asset in preset_options[selected_preset]]
+        for asset_index in range(10):
+            st.session_state.pop(f"t_{selected_portfolio_idx}_{asset_index}", None)
+            st.session_state.pop(f"w_{selected_portfolio_idx}_{asset_index}", None)
+        st.rerun()
+
+assets = curr_p['assets']
+st.info("臺灣上市商品可直接輸入 0050、2330 或 00631L，系統會自動補上 `.TW`。上櫃商品請完整輸入，例如 `6488.TWO`。")
+st.caption("股價資料來自 Yahoo Finance；計算前請確認下方顯示的實際查詢代碼。")
+col_a1, col_a2 = st.columns(2)
+with col_a1:
+    if st.button("➕ 增加一項資產", use_container_width=True) and len(assets) < 10:
+        assets.append({"ticker": "SPY", "weight": 0})
+        st.rerun()
+with col_a2:
+    if st.button("➖ 移除最後一項", use_container_width=True, disabled=len(assets) <= 1):
+        removed_index = len(assets) - 1
+        assets.pop()
+        st.session_state.pop(f"t_{selected_portfolio_idx}_{removed_index}", None)
+        st.session_state.pop(f"w_{selected_portfolio_idx}_{removed_index}", None)
+        st.rerun()
+
+total_weight = 0
+for i, asset in enumerate(assets):
+    cols = st.columns([2, 1])
+    with cols[0]:
+        entered_ticker = st.text_input(f"第 {i+1} 項資產代碼", asset["ticker"], key=f"t_{selected_portfolio_idx}_{i}")
+        asset["ticker"], suffix_added = normalize_ticker(entered_ticker)
+        if suffix_added:
+            st.caption(f"實際查詢：{asset['ticker']}（已自動補上 .TW）")
+    with cols[1]:
+        asset["weight"] = st.number_input(f"比例 (%)", 0, 100, asset["weight"], key=f"w_{selected_portfolio_idx}_{i}")
+    total_weight += asset["weight"]
+
+with st.expander("進階設定｜退休提領與年度再平衡", expanded=False):
     curr_p['withdrawal_enabled'] = st.checkbox("啟用退休提領機制", value=curr_p['withdrawal_enabled'])
-    
     if curr_p['withdrawal_enabled']:
-        st.markdown("👇 **提領參數設定**")
         curr_p['w_rate'] = st.number_input("年提領率 (%)", 0.0, 100.0, float(curr_p.get('w_rate', 4.0)), step=0.1, key=f"wr_{selected_portfolio_idx}")
         curr_p['w_inflation'] = st.number_input("預估年通膨率 (%)", 0.0, 20.0, float(curr_p.get('w_inflation', 2.0)), step=0.1, key=f"wi_{selected_portfolio_idx}")
         curr_p['w_start_year'] = st.number_input("提領開始年份 (第 N 年)", 1, 100, int(curr_p.get('w_start_year', 1)), key=f"ws_{selected_portfolio_idx}")
         st.caption(f"📅 預計提領開始年份：{start_date.year + curr_p['w_start_year'] - 1} 年")
+    enable_rebalance = st.checkbox("每年一月調整回原本比例", value=True)
 
-    assets = curr_p['assets']
-    col_a1, col_a2 = st.columns(2)
-    with col_a1:
-        if st.button("➕ 增加資產") and len(assets) < 10: assets.append({"ticker": "SPY", "weight": 0})
-    with col_a2:
-        if st.button("➖ 減少資產") and len(assets) > 1: assets.pop()
-            
-    total_weight = 0
-    for i, asset in enumerate(assets):
-        cols = st.columns([1, 1])
-        with cols[0]:
-            asset["ticker"] = st.text_input(f"資產 {i+1}", asset["ticker"], key=f"t_{selected_portfolio_idx}_{i}").upper()
-        with cols[1]:
-            asset["weight"] = st.number_input(f"權重 (%)", 0, 100, asset["weight"], key=f"w_{selected_portfolio_idx}_{i}")
-        total_weight += asset["weight"]
-    
-    weight_ok = (total_weight == 100)
-    if not weight_ok: st.error(f"⚠️ 目前權重：{total_weight}% (需為100%)")
-    else: st.success("✅ 權重正確 (100%)")
-    
-    # Optimization #1: Check for zero capital
-    capital_ok = (initial_capital > 0 or monthly_investment > 0)
-    if not capital_ok:
-        st.warning("💰 初始投資和定期定額都為 0，結果將無意義")
+portfolio_errors = validate_portfolios(st.session_state.portfolios)
+selected_tickers = {
+    asset['ticker']
+    for portfolio in st.session_state.portfolios
+    for asset in portfolio['assets']
+}
+data_window_errors = []
+data_window_notices = []
+for ticker, safe_date in KNOWN_MINIMUM_SAFE_DATES.items():
+    if ticker not in selected_tickers or start_date >= safe_date.date():
+        continue
+    if end_date < safe_date.date():
+        data_window_errors.append(
+            f"{ticker}：Yahoo 在 {safe_date:%Y-%m-%d} 前的歷史價格有多處錯置，這段期間無法可靠回測"
+        )
+    else:
+        data_window_notices.append(
+            f"{ticker}：Yahoo 早期資料有多處錯置，實際回測將自動從 {safe_date:%Y-%m-%d} 開始"
+        )
+portfolio_errors.extend(data_window_errors)
+if portfolio_errors:
+    st.error("請先修正以下設定：\n\n- " + "\n- ".join(portfolio_errors))
+else:
+    st.success("✅ 所有投資組合設定正確")
+if data_window_notices:
+    st.warning("資料品質提醒：\n\n- " + "\n- ".join(data_window_notices))
 
-    with st.expander("⚙️ 再平衡設定", expanded=True):
-        enable_rebalance = st.checkbox("啟用年度再平衡", value=True)
+capital_ok = (initial_capital > 0 or monthly_investment > 0)
+if not capital_ok:
+    st.warning("初始投資和每月投入不可同時為 0 元")
 
-    # Move button to sidebar bottom
-    st.markdown("---")
-    # Disable button if weight wrong OR dates invalid
-    can_run = weight_ok and date_ok
-    run_backtest = st.button("🚀 開始計算", type="primary", disabled=not can_run, use_container_width=True)
+st.markdown("---")
+st.subheader("步驟 4｜確認並開始計算")
+years = max(0, end_date.year - start_date.year)
+portfolio_summary = "；".join(
+    f"{p['name']}：" + "、".join(f"{a['ticker']} {a['weight']}%" for a in p['assets'])
+    for p in st.session_state.portfolios
+)
+st.info(f"初始投入 {initial_capital:,.0f} 元，每月投入 {monthly_investment:,.0f} 元，回測約 {years} 年。\n\n{portfolio_summary}")
+can_run = not portfolio_errors and date_ok and capital_ok
+run_backtest = st.button("🚀 開始計算", type="primary", disabled=not can_run, use_container_width=True)
 
-@st.cache_data
+@st.cache_data(ttl=3600, max_entries=64)
 def fetch_data(tickers, start, end):
     try:
-        data = yf.download(list(set(tickers)), start=start, end=end, progress=False)
-        return data, None, list(set(tickers))
+        if not tickers:
+            return pd.DataFrame(), None, [], [], []
+        unique_tickers = sorted(set(tickers))
+        data = yf.download(
+            unique_tickers,
+            start=start,
+            end=end + timedelta(days=1),
+            progress=False,
+            auto_adjust=False,
+            actions=True,
+            repair=True,
+            timeout=15,
+        )
+        data, repair_notices = apply_known_yahoo_repairs(data, unique_tickers)
+        quality_issues = find_suspicious_price_jumps(data, unique_tickers)
+        return data, None, unique_tickers, repair_notices, quality_issues
     except Exception as e:
-        return None, str(e), []
+        return None, str(e), [], [], []
 
 def get_stock_data(df, dt, ticker):
     try:
@@ -354,7 +609,7 @@ def get_stock_data(df, dt, ticker):
         elif pd.isna(p_open):
             p_adj_open = p_adj_close
         return {'adj_close': 0.0 if pd.isna(p_adj_close) else float(p_adj_close), 'adj_open': 0.0 if pd.isna(p_adj_open) else float(p_adj_open)}
-    except:
+    except (KeyError, TypeError, ValueError):
         return {'adj_close': 0.0, 'adj_open': 0.0}
 
 if run_backtest:
@@ -374,39 +629,55 @@ if run_backtest:
         st.session_state.results = None
     else:
         with st.spinner("正在計算中..."):
-            market_data, error, fetched_tickers = fetch_data(all_tickers, start_date, end_date)
+            market_data, error, fetched_tickers, repair_notices, quality_issues = fetch_data(all_tickers, start_date, end_date)
             if error:
                 st.error(f"錯誤: {error}")
                 st.session_state.results = None
-            elif market_data is None or len(market_data) == 0:
+            elif all_tickers and (market_data is None or len(market_data) == 0):
                 st.error("無資料")
                 st.session_state.results = None
             else:
-                market_data = market_data.ffill()
-                # Optimization: Reuse already collected tickers set
+                if repair_notices:
+                    st.info("資料修正：\n\n- " + "\n- ".join(repair_notices))
+                if quality_issues:
+                    st.error(
+                        "偵測到疑似漏算分割、反分割或錯價，為避免產生誤導結果，已停止計算：\n\n- "
+                        + "\n- ".join(quality_issues[:5])
+                        + "\n\n請縮短回測期間，或將商品代碼與日期寄到 ju888.lee@gmail.com 協助確認。"
+                    )
+                    st.session_state.results = None
+                    st.stop()
+                market_data = market_data.ffill() if not market_data.empty else market_data
                 all_active_tickers = set(all_tickers)
-                
+
                 valid_starts, debug_info = [], {}
                 for t in all_active_tickers:
-                    try:
-                        if isinstance(market_data.columns, pd.MultiIndex):
-                            if ('Adj Close', t) in market_data.columns: fvi = market_data[('Adj Close', t)].first_valid_index()
-                            elif ('Close', t) in market_data.columns: fvi = market_data[('Close', t)].first_valid_index()
-                            else: fvi = None
-                        else:
-                            fvi = market_data['Adj Close'].first_valid_index() if 'Adj Close' in market_data.columns else None
-                        if fvi: 
-                            valid_starts.append(fvi)
-                            debug_info[t] = fvi.strftime('%Y-%m-%d')
-                    except: pass
-                
-                # Optimization: Fix crash if no valid data found
-                if not valid_starts:
-                    st.error("❌ 無法取得有效股價資料。請檢查代碼是否正確，或確認該期間有交易數據。")
+                    fvi = first_valid_price_index(market_data, t)
+                    if fvi:
+                        if t in KNOWN_MINIMUM_SAFE_DATES:
+                            fvi = max(fvi, KNOWN_MINIMUM_SAFE_DATES[t])
+                        valid_starts.append(fvi)
+                        debug_info[t] = fvi.strftime('%Y-%m-%d')
+
+                invalid_tickers = sorted(all_active_tickers - set(debug_info))
+                if invalid_tickers:
+                    st.error(f"❌ 找不到有效股價資料：{', '.join(invalid_tickers)}。請檢查代碼或回測期間。")
                     st.session_state.results = None
                     st.stop()
 
-                common_start = max(valid_starts)
+                if valid_starts:
+                    common_start = max(valid_starts)
+                    dates = market_data.index[market_data.index >= common_start]
+                else:
+                    # A CASH0-only portfolio does not require Yahoo market data.
+                    dates = pd.bdate_range(start=start_date, end=end_date)
+                    common_start = dates[0] if len(dates) else pd.Timestamp(start_date)
+
+                if len(dates) == 0:
+                    st.error("❌ 所選日期範圍內沒有可計算的工作日。")
+                    st.session_state.results = None
+                    st.stop()
+
                 results_list, monthly_dfs, annual_returns_data = [], {}, {}
                 # Color palette for consistent coloring across charts
                 color_palette = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52']
@@ -414,14 +685,12 @@ if run_backtest:
                 figs = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.7, 0.3], subplot_titles=("資產成長趨勢", "年度報酬率 (%)"))
 
                 for p in st.session_state.portfolios:
-                    dates = market_data.index[market_data.index >= common_start]
-                    if len(dates) == 0: continue
-                    
                     cash_account = float(initial_capital)
                     holdings = {a['ticker']: {'shares': 0.0, 'cash_asset_currency': 0.0} for a in p['assets']}
                     alloc_map = {a['ticker']: a['weight']/100.0 for a in p['assets']}
                     total_invested = float(initial_capital)
                     history, xirr_flows = [], []
+                    previous_value, unit_nav = None, 100.0
                     if initial_capital > 0: xirr_flows.append((dates[0], -initial_capital))
                     
                     w_enabled = p.get('withdrawal_enabled', False)
@@ -448,6 +717,7 @@ if run_backtest:
                         is_buy = (d.month != prev_mo)
                         if is_buy: prev_mo = d.month
                         todays_wd = 0
+                        todays_contribution = 0
                         
                         if is_buy and w_enabled and ann_budg > 0:
                             tgt = ann_budg / 12.0
@@ -530,6 +800,7 @@ if run_backtest:
                             if monthly_investment > 0:
                                 cash_account += monthly_investment
                                 total_invested += monthly_investment
+                                todays_contribution = monthly_investment
                                 xirr_flows.append((d, -monthly_investment))
                             pot = cash_account
                             cash_account = 0
@@ -550,7 +821,10 @@ if run_backtest:
                             else:
                                 pr = get_stock_data(market_data, d, t)
                                 pv += (h['shares'] * pr['adj_close']) + h['cash_asset_currency']
-                        history.append({'Date': d, 'Total Value': pv, 'Invested Capital': total_invested, 'Withdrawal': todays_wd})
+                        if previous_value is not None:
+                            unit_nav = update_unit_nav(previous_value, pv, todays_contribution - todays_wd, unit_nav)
+                        history.append({'Date': d, 'Total Value': pv, 'Invested Capital': total_invested, 'Withdrawal': todays_wd, 'Unit NAV': unit_nav})
+                        previous_value = pv
                     
                     df_res = pd.DataFrame(history).set_index('Date')
                     if not df_res.empty:
@@ -560,15 +834,15 @@ if run_backtest:
                         dur_str = f"{yr_diff:.1f} 年 ({df_res.index[0].strftime('%Y-%m')} ~ {df_res.index[-1].strftime('%Y-%m')})"
                         
                         # MDD with detailed timing
-                        roll_max = df_res['Total Value'].cummax()
-                        dd = (df_res['Total Value'] - roll_max) / roll_max
+                        roll_max = df_res['Unit NAV'].cummax()
+                        dd = (df_res['Unit NAV'] - roll_max) / roll_max
                         mdd = dd.min()
                         if mdd < 0:
                             mdd_date = dd.idxmin()
                             # Find peak date before MDD
                             peak_date = roll_max[:mdd_date].idxmax()
                             # Find recovery date (if any)
-                            post_mdd = df_res.loc[mdd_date:, 'Total Value']
+                            post_mdd = df_res.loc[mdd_date:, 'Unit NAV']
                             recovery_mask = post_mdd >= roll_max[mdd_date]
                             if recovery_mask.any():
                                 recovery_date = post_mdd[recovery_mask].index[0]
@@ -579,10 +853,11 @@ if run_backtest:
                         else:
                             mdd_str = "0.00%"
 
-                        results_list.append({"組合名稱": p['name'], "回測時間": dur_str, "總投入本金": total_invested, "資產終值": final_v, "總提領金額": cum_wd, "總損益": (final_v + cum_wd) - total_invested, "XIRR": f"{xirr(xirr_flows)*100:.2f}%", "MDD": mdd_str})
+                        xirr_value = xirr(xirr_flows)
+                        xirr_display = f"{xirr_value*100:.2f}%" if xirr_value is not None else "無法計算"
+                        results_list.append({"組合名稱": p['name'], "回測時間": dur_str, "總投入本金": total_invested, "資產終值": final_v, "總提領金額": cum_wd, "總損益": (final_v + cum_wd) - total_invested, "XIRR": xirr_display, "MDD": mdd_str})
                         
-                        try: monthly_dfs[p['name']] = df_res.resample('ME').agg({'Total Value':'last', 'Invested Capital':'last', 'Withdrawal':'sum'})
-                        except: monthly_dfs[p['name']] = df_res.resample('M').agg({'Total Value':'last', 'Invested Capital':'last', 'Withdrawal':'sum'})
+                        monthly_dfs[p['name']] = df_res.resample('ME').agg({'Total Value':'last', 'Invested Capital':'last', 'Withdrawal':'sum'})
                         
                         # Use consistent color for this portfolio
                         port_color = color_palette[portfolio_idx % len(color_palette)]
@@ -597,12 +872,12 @@ if run_backtest:
                         for i, y in enumerate(years):
                             df_y = df_res[df_res.index.year == y]
                             if df_y.empty: continue
-                            end_val = df_y['Total Value'].iloc[-1]
+                            end_val = df_y['Unit NAV'].iloc[-1]
                             if i == 0:
-                                start_val = df_y['Total Value'].iloc[0]
+                                start_val = df_y['Unit NAV'].iloc[0]
                             else:
                                 df_prev = df_res[df_res.index.year == years[i-1]]
-                                start_val = df_prev['Total Value'].iloc[-1] if not df_prev.empty else df_y['Total Value'].iloc[0]
+                                start_val = df_prev['Unit NAV'].iloc[-1] if not df_prev.empty else df_y['Unit NAV'].iloc[0]
                             ret = (end_val / start_val) - 1 if start_val > 0 else 0
                             ann_ret_x.append(datetime(y, 7, 1))
                             ann_ret_y.append(ret * 100)  # Convert to percentage
@@ -661,30 +936,16 @@ if st.session_state.get('results'):
 | 指標 | 白話解釋 |
 |------|----------|
 | **XIRR** | 你的真實年化報酬率（考慮每筆進出的時間點） |
-| **MDD** | 最大回撤 = 從高點跌到最慘時虧了多少%（抗壓測試）|
-| **年度報酬率** | 當年底淨值 ÷ 當年初淨值 - 1 |
+| **MDD** | 最大回撤 = 排除投入與提領後，從高點跌到最慘時虧了多少%（抗壓測試）|
+| **年度報酬率** | 使用單位淨值計算，排除投入與提領對績效的影響 |
 
 ---
 
 ### ⚠️ 提領模式下的報酬率說明
 
-當你開啟「退休提領機制」時，年度報酬率的計算方式是：
+年度報酬率與 MDD 使用「單位淨值」計算。每次投入或提領時，系統會先排除這筆外部現金流的影響，再計算投資本身的漲跌，因此不會把新增本金誤認成獲利，也不會把退休提領誤認成虧損。
 
-**年度報酬率 = (年底帳戶淨值 ÷ 年初帳戶淨值) - 1**
-
-🔔 **重點**：這個數字**不包含**你領走的錢！
-
-舉例：
-- 年初帳戶有 100 萬
-- 這一年你領走了 4 萬
-- 年底帳戶剩 102 萬
-- 年度報酬率 = (102 ÷ 100) - 1 = **+2%**
-
-但實際上，如果把領走的錢也算進來：
-- 總財富 = 102 + 4 = 106 萬
-- 真實報酬 = (106 ÷ 100) - 1 = **+6%**
-
-💡 **為什麼這樣設計？** 因為年度報酬率主要是讓你觀察「帳戶還剩多少」的變化趨勢，判斷資產是否足夠支撐退休提領。如果想看「投資效率」，請參考 **XIRR** 指標，它會正確計算每筆進出（包含提領）的時間價值。
+如果想查看整段期間、包含每筆投入與提領時間的個人化報酬率，請參考 **XIRR** 指標。
 
 ---
 
@@ -716,10 +977,22 @@ if st.session_state.get('results'):
         st.plotly_chart(res['fig'], use_container_width=True)
         
     elif active_tab == "📊 績效指標":
-        st.markdown("### 🏆 總體績效")
-        st.dataframe(pd.DataFrame(res['summary']).style.format({"總投入本金":"{:,.0f}", "資產終值":"{:,.0f}", "總提領金額":"{:,.0f}", "總損益":"{:,.0f}"}))
+        st.markdown("### 🏆 績效重點")
+        for summary_row in res['summary']:
+            st.markdown(f"#### {summary_row['組合名稱']}")
+            mdd_value = summary_row['MDD'].split(' ', 1)[0]
+            metric_col1, metric_col2 = st.columns(2)
+            metric_col1.metric("總投入本金", f"{summary_row['總投入本金']:,.0f} 元")
+            metric_col2.metric("最後資產", f"{summary_row['資產終值']:,.0f} 元")
+            metric_col3, metric_col4 = st.columns(2)
+            metric_col3.metric("總損益", f"{summary_row['總損益']:,.0f} 元")
+            metric_col4.metric("最大跌幅 MDD", mdd_value)
+            st.caption(f"年化報酬率 XIRR：{summary_row['XIRR']}｜回測時間：{summary_row['回測時間']}｜最大跌幅期間：{summary_row['MDD']}")
+
+        with st.expander("查看完整績效表", expanded=False):
+            st.dataframe(pd.DataFrame(res['summary']).style.format({"總投入本金":"{:,.0f}", "資產終值":"{:,.0f}", "總提領金額":"{:,.0f}", "總損益":"{:,.0f}"}), use_container_width=True)
         st.markdown("### 📅 歷年報酬率明細")
-        st.caption("計算方式：當年底淨值 ÷ 當年初淨值 - 1")
+        st.caption("使用排除投入與提領影響的單位淨值計算")
         if res.get('annual_returns'):
             df_ann = pd.DataFrame(res['annual_returns'])
             if not df_ann.empty:
@@ -736,4 +1009,13 @@ if st.session_state.get('results'):
                 idx = opts.index(curr)
         
         sel = st.selectbox("選擇投資組合", opts, index=idx, key='view_portfolio_selector')
-        if sel: st.dataframe(res['monthly_data'][sel].style.format("{:,.0f}"))
+        if sel:
+            detail_df = res['monthly_data'][sel].rename(columns={
+                'Total Value': '帳戶總值',
+                'Invested Capital': '累計投入本金',
+                'Withdrawal': '當月提領',
+            })
+            st.dataframe(detail_df.style.format("{:,.0f}"), use_container_width=True)
+
+st.markdown("---")
+st.caption("作者：[豬力安](https://richedu168.blogspot.com/)｜聯絡信箱：ju888.lee@gmail.com")

@@ -1,11 +1,11 @@
 streamlit[auth]==1.56.0
 Authlib==1.6.11
-httpx
-yfinance
-pandas
-numpy
-plotly
-scipy
-gspread
-google-auth
+httpx==0.28.1
+yfinance==1.4.1
+pandas==3.0.3
+numpy==2.4.6
+plotly==6.7.0
+scipy==1.17.1
+gspread==6.2.1
+google-auth==2.53.0
 
