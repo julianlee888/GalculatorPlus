@@ -263,6 +263,17 @@ def update_unit_nav(previous_value, ending_value, net_external_flow, previous_na
     period_return = (ending_value - adjusted_start) / adjusted_start
     return previous_nav * (1 + period_return)
 
+
+def normalize_portfolio_index(value, portfolio_count):
+    """Return a valid portfolio index for transient Streamlit widget states."""
+    if portfolio_count <= 0:
+        return 0
+    try:
+        index = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return min(max(index, 0), portfolio_count - 1)
+
 # ============================================================
 # 🚀 應用程式入口
 # ============================================================
@@ -450,10 +461,15 @@ for p in st.session_state.portfolios:
     if 'w_start_year' not in p: p['w_start_year'] = 1
 
 pending_portfolio_idx = st.session_state.pop('_pending_portfolio_idx', None)
-if pending_portfolio_idx is not None:
-    st.session_state.selected_portfolio_idx = min(pending_portfolio_idx, len(st.session_state.portfolios) - 1)
-elif st.session_state.get('selected_portfolio_idx', 0) >= len(st.session_state.portfolios):
-    st.session_state.selected_portfolio_idx = len(st.session_state.portfolios) - 1
+portfolio_index_state = (
+    pending_portfolio_idx
+    if pending_portfolio_idx is not None
+    else st.session_state.get('selected_portfolio_idx', 0)
+)
+st.session_state.selected_portfolio_idx = normalize_portfolio_index(
+    portfolio_index_state,
+    len(st.session_state.portfolios),
+)
 
 
 def sync_portfolio_name(portfolio_index):
@@ -480,6 +496,10 @@ with st.container(border=True, key="portfolio_identity"):
         range(len(st.session_state.portfolios)),
         format_func=lambda i: st.session_state.portfolios[i]['name'],
         key="selected_portfolio_idx",
+    )
+    selected_portfolio_idx = normalize_portfolio_index(
+        selected_portfolio_idx,
+        len(st.session_state.portfolios),
     )
 
     col_p1, col_p2, col_p3 = st.columns(3)
