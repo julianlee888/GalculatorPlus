@@ -288,6 +288,16 @@ p, label, [data-testid="stCaptionContainer"] { line-height: 1.65 !important; }
 [data-testid="stMetricLabel"] { font-size: 1rem !important; }
 [data-testid="stRadio"] [role="radiogroup"] { flex-wrap: wrap; gap: .4rem 1rem; }
 [data-testid="stAlert"] { border-radius: 6px; }
+.st-key-portfolio_identity {
+    border: 2px solid #7eb39f !important;
+    border-left: 6px solid var(--gp-green) !important;
+    background: #f4faf7;
+}
+.st-key-asset_settings {
+    border: 2px solid #dfc77f !important;
+    border-left: 6px solid var(--gp-gold) !important;
+    background: #fffaf0;
+}
 @media (max-width: 768px) {
     .block-container { padding: .8rem .75rem 2rem; }
     h1 { font-size: 1.7rem !important; }
@@ -439,34 +449,19 @@ for p in st.session_state.portfolios:
     if 'w_inflation' not in p: p['w_inflation'] = 2.0
     if 'w_start_year' not in p: p['w_start_year'] = 1
 
-selected_portfolio_idx = st.selectbox("目前編輯的投資組合", range(len(st.session_state.portfolios)), format_func=lambda i: st.session_state.portfolios[i]['name'])
+pending_portfolio_idx = st.session_state.pop('_pending_portfolio_idx', None)
+if pending_portfolio_idx is not None:
+    st.session_state.selected_portfolio_idx = min(pending_portfolio_idx, len(st.session_state.portfolios) - 1)
+elif st.session_state.get('selected_portfolio_idx', 0) >= len(st.session_state.portfolios):
+    st.session_state.selected_portfolio_idx = len(st.session_state.portfolios) - 1
 
-col_p1, col_p2, col_p3 = st.columns(3)
-with col_p1:
-    if st.button("➕ 新增組合", use_container_width=True) and len(st.session_state.portfolios) < 10:
-        st.session_state.portfolios.append({"name": f"組合 {len(st.session_state.portfolios)+1}", "assets": [{"ticker": "QQQ", "weight": 100}], "withdrawal_enabled": False, "w_rate": 4.0, "w_inflation": 2.0, "w_start_year": 1})
-        st.rerun()
-with col_p2:
-    if st.button("📋 複製組合", use_container_width=True) and len(st.session_state.portfolios) < 10:
-        src = st.session_state.portfolios[selected_portfolio_idx]
-        st.session_state.portfolios.append({"name": src["name"] + " (副本)", "assets": [{"ticker": a["ticker"], "weight": a["weight"]} for a in src["assets"]], "withdrawal_enabled": src.get("withdrawal_enabled", False), "w_rate": src.get("w_rate", 4.0), "w_inflation": src.get("w_inflation", 2.0), "w_start_year": src.get("w_start_year", 1)})
-        st.rerun()
-with col_p3:
-    if st.button("🗑️ 刪除組合", use_container_width=True, disabled=len(st.session_state.portfolios) <= 1):
-        st.session_state.portfolios.pop(selected_portfolio_idx)
-        for portfolio_index in range(10):
-            st.session_state.pop(f"name_{portfolio_index}", None)
-            st.session_state.pop(f"preset_{portfolio_index}", None)
-            for asset_index in range(10):
-                st.session_state.pop(f"t_{portfolio_index}_{asset_index}", None)
-                st.session_state.pop(f"w_{portfolio_index}_{asset_index}", None)
-        st.rerun()
 
-if selected_portfolio_idx >= len(st.session_state.portfolios):
-    selected_portfolio_idx = len(st.session_state.portfolios) - 1
+def sync_portfolio_name(portfolio_index):
+    """Update the selectbox label before Streamlit renders the next run."""
+    name_key = f"name_{portfolio_index}"
+    if portfolio_index < len(st.session_state.portfolios) and name_key in st.session_state:
+        st.session_state.portfolios[portfolio_index]['name'] = st.session_state[name_key]
 
-curr_p = st.session_state.portfolios[selected_portfolio_idx]
-curr_p['name'] = st.text_input("組合名稱", curr_p['name'], key=f"name_{selected_portfolio_idx}")
 
 preset_options = {
     "自行設定": None,
@@ -476,45 +471,93 @@ preset_options = {
     "股債平衡｜SPY 60% + BND 40%": [{"ticker": "SPY", "weight": 60}, {"ticker": "BND", "weight": 40}],
     "穩健配置｜SPY 40% + BND 40% + 現金 20%": [{"ticker": "SPY", "weight": 40}, {"ticker": "BND", "weight": 40}, {"ticker": "CASH0", "weight": 20}],
 }
-preset_col1, preset_col2 = st.columns([2, 1])
-with preset_col1:
-    selected_preset = st.selectbox("常用組合範例", list(preset_options), key=f"preset_{selected_portfolio_idx}")
-with preset_col2:
-    st.write("")
-    if st.button("套用這個範例", use_container_width=True, disabled=preset_options[selected_preset] is None):
-        curr_p['assets'] = [asset.copy() for asset in preset_options[selected_preset]]
-        for asset_index in range(10):
-            st.session_state.pop(f"t_{selected_portfolio_idx}_{asset_index}", None)
-            st.session_state.pop(f"w_{selected_portfolio_idx}_{asset_index}", None)
-        st.rerun()
 
-assets = curr_p['assets']
-st.info("臺灣上市商品可直接輸入 0050、2330 或 00631L，系統會自動補上 `.TW`。上櫃商品請完整輸入，例如 `6488.TWO`。")
-st.caption("股價資料來自 Yahoo Finance；計算前請確認下方顯示的實際查詢代碼。")
-col_a1, col_a2 = st.columns(2)
-with col_a1:
-    if st.button("➕ 增加一項資產", use_container_width=True) and len(assets) < 10:
-        assets.append({"ticker": "SPY", "weight": 0})
-        st.rerun()
-with col_a2:
-    if st.button("➖ 移除最後一項", use_container_width=True, disabled=len(assets) <= 1):
-        removed_index = len(assets) - 1
-        assets.pop()
-        st.session_state.pop(f"t_{selected_portfolio_idx}_{removed_index}", None)
-        st.session_state.pop(f"w_{selected_portfolio_idx}_{removed_index}", None)
-        st.rerun()
 
-total_weight = 0
-for i, asset in enumerate(assets):
-    cols = st.columns([2, 1])
-    with cols[0]:
-        entered_ticker = st.text_input(f"第 {i+1} 項資產代碼", asset["ticker"], key=f"t_{selected_portfolio_idx}_{i}")
-        asset["ticker"], suffix_added = normalize_ticker(entered_ticker)
-        if suffix_added:
-            st.caption(f"實際查詢：{asset['ticker']}（已自動補上 .TW）")
-    with cols[1]:
-        asset["weight"] = st.number_input(f"比例 (%)", 0, 100, asset["weight"], key=f"w_{selected_portfolio_idx}_{i}")
-    total_weight += asset["weight"]
+with st.container(border=True, key="portfolio_identity"):
+    st.markdown("#### A. 選擇與命名投資組合")
+    selected_portfolio_idx = st.selectbox(
+        "目前編輯的投資組合",
+        range(len(st.session_state.portfolios)),
+        format_func=lambda i: st.session_state.portfolios[i]['name'],
+        key="selected_portfolio_idx",
+    )
+
+    col_p1, col_p2, col_p3 = st.columns(3)
+    with col_p1:
+        if st.button("➕ 新增組合", use_container_width=True) and len(st.session_state.portfolios) < 10:
+            st.session_state.portfolios.append({"name": f"組合 {len(st.session_state.portfolios)+1}", "assets": [{"ticker": "QQQ", "weight": 100}], "withdrawal_enabled": False, "w_rate": 4.0, "w_inflation": 2.0, "w_start_year": 1})
+            st.session_state._pending_portfolio_idx = len(st.session_state.portfolios) - 1
+            st.rerun()
+    with col_p2:
+        if st.button("📋 複製組合", use_container_width=True) and len(st.session_state.portfolios) < 10:
+            src = st.session_state.portfolios[selected_portfolio_idx]
+            st.session_state.portfolios.append({"name": src["name"] + " (副本)", "assets": [{"ticker": a["ticker"], "weight": a["weight"]} for a in src["assets"]], "withdrawal_enabled": src.get("withdrawal_enabled", False), "w_rate": src.get("w_rate", 4.0), "w_inflation": src.get("w_inflation", 2.0), "w_start_year": src.get("w_start_year", 1)})
+            st.session_state._pending_portfolio_idx = len(st.session_state.portfolios) - 1
+            st.rerun()
+    with col_p3:
+        if st.button("🗑️ 刪除組合", use_container_width=True, disabled=len(st.session_state.portfolios) <= 1):
+            st.session_state.portfolios.pop(selected_portfolio_idx)
+            st.session_state._pending_portfolio_idx = min(selected_portfolio_idx, len(st.session_state.portfolios) - 1)
+            for portfolio_index in range(10):
+                st.session_state.pop(f"name_{portfolio_index}", None)
+                st.session_state.pop(f"preset_{portfolio_index}", None)
+                for asset_index in range(10):
+                    st.session_state.pop(f"t_{portfolio_index}_{asset_index}", None)
+                    st.session_state.pop(f"w_{portfolio_index}_{asset_index}", None)
+            st.rerun()
+
+    curr_p = st.session_state.portfolios[selected_portfolio_idx]
+    name_key = f"name_{selected_portfolio_idx}"
+    if name_key not in st.session_state:
+        st.session_state[name_key] = curr_p['name']
+    curr_p['name'] = st.text_input(
+        "組合名稱",
+        key=name_key,
+        on_change=sync_portfolio_name,
+        args=(selected_portfolio_idx,),
+    )
+
+    preset_col1, preset_col2 = st.columns([2, 1])
+    with preset_col1:
+        selected_preset = st.selectbox("常用組合範例", list(preset_options), key=f"preset_{selected_portfolio_idx}")
+    with preset_col2:
+        st.write("")
+        if st.button("套用這個範例", use_container_width=True, disabled=preset_options[selected_preset] is None):
+            curr_p['assets'] = [asset.copy() for asset in preset_options[selected_preset]]
+            for asset_index in range(10):
+                st.session_state.pop(f"t_{selected_portfolio_idx}_{asset_index}", None)
+                st.session_state.pop(f"w_{selected_portfolio_idx}_{asset_index}", None)
+            st.rerun()
+
+with st.container(border=True, key="asset_settings"):
+    st.markdown(f"#### B. 設定「{curr_p['name'] or '未命名組合'}」的資產")
+    assets = curr_p['assets']
+    st.info("臺灣上市商品可直接輸入 0050、2330 或 00631L，系統會自動補上 `.TW`。上櫃商品請完整輸入，例如 `6488.TWO`。")
+    st.caption("股價資料來自 Yahoo Finance；計算前請確認下方顯示的實際查詢代碼。")
+    col_a1, col_a2 = st.columns(2)
+    with col_a1:
+        if st.button("➕ 增加一項資產", use_container_width=True) and len(assets) < 10:
+            assets.append({"ticker": "SPY", "weight": 0})
+            st.rerun()
+    with col_a2:
+        if st.button("➖ 移除最後一項", use_container_width=True, disabled=len(assets) <= 1):
+            removed_index = len(assets) - 1
+            assets.pop()
+            st.session_state.pop(f"t_{selected_portfolio_idx}_{removed_index}", None)
+            st.session_state.pop(f"w_{selected_portfolio_idx}_{removed_index}", None)
+            st.rerun()
+
+    total_weight = 0
+    for i, asset in enumerate(assets):
+        cols = st.columns([2, 1])
+        with cols[0]:
+            entered_ticker = st.text_input(f"第 {i+1} 項資產代碼", asset["ticker"], key=f"t_{selected_portfolio_idx}_{i}")
+            asset["ticker"], suffix_added = normalize_ticker(entered_ticker)
+            if suffix_added:
+                st.caption(f"實際查詢：{asset['ticker']}（已自動補上 .TW）")
+        with cols[1]:
+            asset["weight"] = st.number_input(f"比例 (%)", 0, 100, asset["weight"], key=f"w_{selected_portfolio_idx}_{i}")
+        total_weight += asset["weight"]
 
 with st.expander("進階設定｜退休提領與年度再平衡", expanded=False):
     curr_p['withdrawal_enabled'] = st.checkbox("啟用退休提領機制", value=curr_p['withdrawal_enabled'])
@@ -861,10 +904,64 @@ if run_backtest:
                         
                         # Use consistent color for this portfolio
                         port_color = color_palette[portfolio_idx % len(color_palette)]
-                        figs.add_trace(go.Scatter(x=df_res.index, y=df_res['Total Value'], mode='lines', name=f"{p['name']} (市值)", line=dict(color=port_color)), row=1, col=1)
+                        monthly_withdrawals = df_res['Withdrawal'].groupby(
+                            df_res.index.to_period('M')
+                        ).transform('sum')
+                        hover_data = np.column_stack((
+                            df_res['Invested Capital'].to_numpy(),
+                            monthly_withdrawals.to_numpy(),
+                        ))
+                        figs.add_trace(
+                            go.Scatter(
+                                x=df_res.index,
+                                y=df_res['Total Value'],
+                                mode='lines',
+                                name=f"{p['name']} (市值)",
+                                line=dict(color=port_color),
+                                customdata=hover_data,
+                                hovertemplate=(
+                                    "%{x|%Y-%m-%d}<br>"
+                                    "資產市值：%{y:,.0f}<br>"
+                                    "累計投入：%{customdata[0]:,.0f}<br>"
+                                    "當月提領：%{customdata[1]:,.0f}"
+                                    "<extra>%{fullData.name}</extra>"
+                                ),
+                            ),
+                            row=1,
+                            col=1,
+                        )
                         wd_pts = df_res[df_res['Withdrawal'] > 0]
                         if not wd_pts.empty:
-                            figs.add_trace(go.Scatter(x=wd_pts.index, y=wd_pts['Total Value'], mode='markers', marker=dict(size=5,color='red'), showlegend=False), row=1, col=1)
+                            first_wd = wd_pts.iloc[[0]]
+                            first_wd_monthly_total = float(
+                                wd_pts.loc[
+                                    wd_pts.index.to_period('M') == first_wd.index[0].to_period('M'),
+                                    'Withdrawal',
+                                ].sum()
+                            )
+                            figs.add_trace(
+                                go.Scatter(
+                                    x=first_wd.index,
+                                    y=first_wd['Total Value'],
+                                    mode='markers',
+                                    marker=dict(
+                                        size=11,
+                                        color=port_color,
+                                        symbol='diamond-open',
+                                        line=dict(width=2, color=port_color),
+                                    ),
+                                    customdata=np.array([[first_wd_monthly_total]]),
+                                    hovertemplate=(
+                                        "%{x|%Y-%m-%d}<br>開始提領<br>"
+                                        "當月首次提領：%{customdata[0]:,.0f}"
+                                        "<extra>%{fullData.name}</extra>"
+                                    ),
+                                    name=f"{p['name']} (開始提領)",
+                                    showlegend=False,
+                                ),
+                                row=1,
+                                col=1,
+                            )
 
                         years = sorted(df_res.index.year.unique())
                         ann_ret_x, ann_ret_y, ann_ret_labels = [], [], {}
@@ -975,6 +1072,7 @@ if st.session_state.get('results'):
     if active_tab == "📈 資產成長圖":
         res['fig'].update_layout(height=800, hovermode="x unified", title="資產成長完整分析")
         st.plotly_chart(res['fig'], use_container_width=True)
+        st.caption("曲線上的菱形只標示各組合第一次提領；將滑鼠移到曲線上或在手機點按，可查看當月提領與累計投入金額。")
         
     elif active_tab == "📊 績效指標":
         st.markdown("### 🏆 績效重點")
